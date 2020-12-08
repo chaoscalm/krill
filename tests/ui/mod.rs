@@ -24,7 +24,7 @@ pub async fn run_krill_ui_test(test_name: &str, _with_openid_server: bool) {
 
     #[cfg(feature = "multi-user")]
     if _with_openid_server {
-        openid_connect_mock::stop(mock_server_join_handle).await;
+        openid_connect_mock::stop(mock_server_join_handle);
     }
 }
 

@@ -69,10 +69,6 @@ static-openssl = [ "openssl/vendored" ]
 [profile.release]
 panic = "abort"
 
-[dev-dependencies]
-# for user management
-tiny_http = "^0.7"
-
 # ------------------------------------------------------------------------------
 # START DEBIAN PACKAGING
 #

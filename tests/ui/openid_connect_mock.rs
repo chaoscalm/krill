@@ -1,20 +1,16 @@
+use hyper::{Body, Method, Response, Server, StatusCode, service::{make_service_fn, service_fn}};
 use openidconnect::*;
 use openidconnect::core::*;
 use openidconnect::PrivateSigningKey;
 use openssl::rsa::Rsa;
 use serde::{Deserialize, Serialize};
-use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
-use urlparse::{GetQuery, Query, Url, parse_qs, urlparse};
+use urlparse::{GetQuery, Query, parse_qs};
 
-use tokio::task;
-use tokio::time::delay_for;
+use tokio::{sync::oneshot::Sender};
 
 use krill::commons::error::Error;
 
-use std::collections::HashMap;
-use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
+use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::{Arc, Mutex}};
 use std::time::Duration;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -98,30 +94,33 @@ type KnownUserId = &'static str;
 type KnownUsers = HashMap<KnownUserId, KnownUser>;
 
 const DEFAULT_TOKEN_DURATION_SECS: u32 = 3600;
-static MOCK_OPENID_CONNECT_SERVER_RUNNING_FLAG: AtomicBool = AtomicBool::new(false);
 
-pub async fn start() -> Option<task::JoinHandle<()>> {
-    let join_handle = task::spawn_blocking(run_mock_openid_connect_server);
+pub async fn start() -> Option<Sender<()>> {
+    // let join_handle = task::spawn_blocking(run_mock_openid_connect_server);
 
-    // wait for the mock OpenID Connect server to be up before continuing
-    // otherwise Krill might fail to query its discovery endpoint
-    while !MOCK_OPENID_CONNECT_SERVER_RUNNING_FLAG.load(Ordering::Relaxed) {
-        println!("Waiting for mock OpenID Connect server to start");
-        delay_for(Duration::from_secs(1)).await;
-    }
+    // // wait for the mock OpenID Connect server to be up before continuing
+    // // otherwise Krill might fail to query its discovery endpoint
+    // while !MOCK_OPENID_CONNECT_SERVER_RUNNING_FLAG.load(Ordering::Relaxed) {
+    //     println!("Waiting for mock OpenID Connect server to start");
+    //     delay_for(Duration::from_secs(1)).await;
+    // }
 
-    Some(join_handle)
+    // Some(join_handle)
+    Some(run_mock_openid_connect_server().await)
 }
 
-pub async fn stop(join_handle: Option<task::JoinHandle<()>>) {
-    MOCK_OPENID_CONNECT_SERVER_RUNNING_FLAG.store(false, Ordering::Relaxed);
-    if let Some(join_handle) = join_handle {
-        join_handle.await.unwrap();
+pub fn stop(tx: Option<Sender<()>>) {
+    // MOCK_OPENID_CONNECT_SERVER_RUNNING_FLAG.store(false, Ordering::Relaxed);
+    // if let Some(join_handle) = join_handle {
+    //     join_handle.await.unwrap();
+    // }
+    if let Some(tx) = tx {
+        tx.send(());
     }
 }
 
-fn run_mock_openid_connect_server() {
-    thread::spawn(|| {
+async fn run_mock_openid_connect_server() -> Sender<()> {
+    // thread::spawn(|| -> tokio::sync::oneshot::Sender<()> {
         let mut authz_codes = TempAuthzCodes::new();
         let mut login_sessions = LoginSessions::new();
         let mut known_users = KnownUsers::new();
@@ -175,7 +174,7 @@ fn run_mock_openid_connect_server() {
             .map_err(|err| Error::custom(format!("Error while building jwks JSON response: {}", err))).unwrap();
         let login_doc = std::fs::read_to_string("test-resources/ui/oidc_login.html").unwrap();
 
-        fn make_id_token_response(signing_key: &CoreRsaPrivateSigningKey, authz: &TempAuthzCodeDetails, session: &LoginSession, known_users: &KnownUsers) -> Result<CustomTokenResponse, Error> {
+        fn make_id_token_response(signing_key: Arc<Mutex<CoreRsaPrivateSigningKey>>, authz: &TempAuthzCodeDetails, session: &LoginSession, known_users: &KnownUsers) -> Result<CustomTokenResponse, Error> {
             let mut access_token_bytes: [u8; 4] = [0; 4];
             openssl::rand::rand_bytes(&mut access_token_bytes)
                 .map_err(|err: openssl::error::ErrorStack| Error::custom(format!("Rand error: {}", err)))?;
@@ -191,6 +190,7 @@ fn run_mock_openid_connect_server() {
                 log_warning(&format!("Issuing token with non-default expiration time of {} seconds", &token_duration));
             }
 
+            let signing_key = signing_key.lock().unwrap();
             let id_token = CustomIdToken::new(
                 CustomIdTokenClaims::new(
                     // Specify the issuer URL for the OpenID Connect Provider.
@@ -228,7 +228,7 @@ fn run_mock_openid_connect_server() {
                 // with one of the CoreJwsSigningAlgorithm::HmacSha* signing algorithms. When using an
                 // HMAC-based signing algorithm, the UTF-8 representation of the client secret should
                 // be used as the HMAC key.
-                signing_key,
+                &*signing_key,
                 // Uses the RS256 signature algorithm. This crate supports any RS*, PS*, or HS*
                 // signature algorithm.
                 CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
@@ -271,47 +271,54 @@ fn run_mock_openid_connect_server() {
             query.get_first_from_str(param).ok_or(Error::custom(format!("Missing query parameter '{}'", param)))
         }
 
-        fn handle_discovery_request(request: Request, discovery_doc: &str) -> Result<(), Error> {
-            request.respond(
-                Response::empty(StatusCode(200))
-                    .with_header(Header::from_str("Content-Type: application/json").unwrap())
-                    .with_data(discovery_doc.clone().as_bytes(), None)
-            ).map_err(|err| err.into())
+        fn str_to_body(in_str: &str) -> Body {
+            let res: Result<_, Error> = Ok(in_str.to_string());
+            let chunks: Vec<Result<_, _>> = vec![res];
+            let stream = futures_util::stream::iter(chunks);
+            Body::wrap_stream(stream)
         }
 
-        fn handle_jwks_request(request: Request, jwks_doc: &str) -> Result<(), Error> {
-            request.respond(
-                Response::empty(StatusCode(200))
-                    .with_header(Header::from_str("Content-Type: application/json").unwrap())
-                    .with_data(jwks_doc.clone().as_bytes(), None)
-            ).map_err(|err: std::io::Error| Error::custom(format!("IO error: {}", err)))
+        fn handle_discovery_request(request: hyper::Request<hyper::Body>, discovery_doc: &str) -> Result<hyper::Response<hyper::Body>, Error> {
+            Response::builder()
+                .header("Content-Type", "application/json")
+                .status(StatusCode::OK)
+                .body(str_to_body(discovery_doc))
+                .map_err(|err| Error::custom(err))
         }
 
-        fn handle_authorize_request(request: Request, url: Url, login_doc: &str) -> Result<(), Error> {
-            let query = url.get_parsed_query().ok_or(Error::custom("Missing query parameters"))?;
+        fn handle_jwks_request(request: hyper::Request<hyper::Body>, jwks_doc: &str) -> Result<hyper::Response<hyper::Body>, Error> {
+            Response::builder()
+                .header("Content-Type", "application/json")
+                .status(StatusCode::OK)
+                .body(str_to_body(jwks_doc))
+                .map_err(|err| Error::custom(err))
+        }
+
+        fn handle_authorize_request(request: hyper::Request<hyper::Body>, login_doc: &str) -> Result<hyper::Response<hyper::Body>, Error> {
+            let query = parse_qs(request.uri().query().unwrap_or(""));
             let client_id = require_query_param(&query, "client_id")?;
             let nonce = require_query_param(&query, "nonce")?;
             let state = require_query_param(&query, "state")?;
             let redirect_uri = require_query_param(&query, "redirect_uri")?;
+            let body = login_doc
+                .replace("<NONCE>", &base64::encode(&nonce))
+                .replace("<STATE>", &base64::encode(&state))
+                .replace("<REDIRECT_URI>", &base64::encode(&redirect_uri))
+                .replace("<CLIENT_ID>", &base64::encode(&client_id));
 
-            request.respond(
-                Response::empty(StatusCode(200))
-                    .with_header(Header::from_str("Content-Type: text/html").unwrap())
-                    .with_data(login_doc
-                        .replace("<NONCE>", &base64::encode(&nonce))
-                        .replace("<STATE>", &base64::encode(&state))
-                        .replace("<REDIRECT_URI>", &base64::encode(&redirect_uri))
-                        .replace("<CLIENT_ID>", &base64::encode(&client_id))
-                        .as_bytes(), None)
-            ).map_err(|err| err.into())
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "text/html")
+                .body(str_to_body(&body))
+                .map_err(|err| Error::custom(err))
         }
 
-        fn handle_login_request(request: Request, url: Url, authz_codes: &mut TempAuthzCodes, known_users: &KnownUsers) -> Result<(), Error> {
-            let query = url.get_parsed_query().ok_or(Error::custom("Missing query parameters"))?;
+        fn handle_login_request(request: hyper::Request<hyper::Body>, authz_codes: &mut TempAuthzCodes, known_users: &KnownUsers) -> Result<hyper::Response<hyper::Body>, Error> {
+            let query = parse_qs(request.uri().query().unwrap_or(""));
             let redirect_uri = require_query_param(&query, "redirect_uri")?;
             let redirect_uri = base64_decode(redirect_uri)?;
 
-            fn with_redirect_uri(redirect_uri: String, query: Query, authz_codes: &mut TempAuthzCodes, known_users: &KnownUsers) -> Result<Response<std::io::Empty>, Error> {
+            fn with_redirect_uri(redirect_uri: String, query: Query, authz_codes: &mut TempAuthzCodes, known_users: &KnownUsers) -> Result<hyper::Response<hyper::Body>, Error> {
                 let username = require_query_param(&query, "username")?;
 
                 match known_users.get(username.as_str()) {
@@ -335,11 +342,12 @@ fn run_mock_openid_connect_server() {
                         let urlsafe_state = url_encode(state)?;
                         let urlsafe_nonce = url_encode(nonce)?;
 
-                        Ok(Response::empty(StatusCode(302))
-                            .with_header(Header::from_str(
-                                &format!("Location: {}?code={}&state={}&nonce={}",
-                                    redirect_uri, urlsafe_code, urlsafe_state, urlsafe_nonce)
-                            ).map_err(|err| Error::custom(format!("Error while constructing HTTP Location header: {:?}", err)))?))
+                        Response::builder()
+                            .status(StatusCode::FOUND)
+                            .header("Location", &format!("{}?code={}&state={}&nonce={}",
+                                redirect_uri, urlsafe_code, urlsafe_state, urlsafe_nonce))
+                            .body(Body::empty())
+                            .map_err(|err| Error::custom(err))
                     },
                     None => Err(Error::custom("Invalid credentials"))
                 }
@@ -348,26 +356,11 @@ fn run_mock_openid_connect_server() {
             // per RFC 6749 and OpenID Connect Core 1.0 section 3.1.26
             // Authentication Error Response we should still return a
             // redirect on error but with query params describing the error.
-            let response = match with_redirect_uri(redirect_uri.clone(), query, authz_codes, known_users) {
-                Ok(response) => response,
-                Err(err) => {
-                    Response::empty(StatusCode(302))
-                        .with_header(Header::from_str(
-                            &format!("Location: {}?error={}",
-                                redirect_uri,
-                                url_encode(format!("{}", err))?)
-                        ).map_err(|err| Error::custom(format!("Error while constructing HTTP Location header: {:?}", err)))?)
-                }
-            };
-
-            request.respond(response).map_err(|err| err.into())
+            with_redirect_uri(redirect_uri.clone(), query, authz_codes, known_users)
         }
 
-        fn handle_token_request(mut request: Request, signing_key: &CoreRsaPrivateSigningKey, authz_codes: &mut TempAuthzCodes, login_sessions: &mut LoginSessions, known_users: &KnownUsers) -> Result<(), Error> {
-            let mut body = String::new();
-            request.as_reader().read_to_string(&mut body)?;
-
-            let query_params = parse_qs(body);
+        fn handle_token_request(mut request: hyper::Request<hyper::Body>, signing_key: Arc<Mutex<CoreRsaPrivateSigningKey>>, authz_codes: &mut TempAuthzCodes, login_sessions: &mut LoginSessions, known_users: &KnownUsers) -> Result<hyper::Response<hyper::Body>, Error> {
+            let query_params = parse_qs(request.uri().query().unwrap_or(""));
 
             if let Some(code) = query_params.get("code") {
                 let code = &code[0];
@@ -380,80 +373,98 @@ fn run_mock_openid_connect_server() {
 
                     let token_response = make_id_token_response(signing_key, &authz_code, &session, known_users)?;
                     let token_doc = serde_json::to_string(&token_response)
-                    .map_err(|err| Error::custom(format!("Error while building ID Token JSON response: {}", err)))?;
+                        .map_err(|err| Error::custom(format!("Error while building ID Token JSON response: {}", err)))?;
 
                     login_sessions.insert(token_response.access_token().secret().clone(), session);
 
-                    request.respond(
-                        Response::empty(StatusCode(200))
-                        .with_header(Header::from_str("Content-Type: application/json").unwrap())
-                        .with_data(token_doc.clone().as_bytes(), None)
-                    ).map_err(|err| err.into())
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header("Content-Type", "application/json")
+                        .body(str_to_body(&token_doc))
+                        .map_err(|err| Error::custom(err))
                 } else {
-                    Err(Error::custom(format!("Unknown temporary authorization code '{}'", &code)))
+                    Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(str_to_body(&format!("Unknown temporary authorization code '{}'", &code)))
+                        .map_err(|err| Error::custom(err))
                 }
             } else {
-                Err(Error::custom("Missing query parameter 'code'"))
-            }
+                Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(str_to_body("Missing query parameter 'code'"))
+                    .map_err(|err| Error::custom(err))
+                }
         }
 
-        fn handle_user_info_request(request: Request) -> Result<(), Error> {
+        fn handle_user_info_request(request: hyper::Request<hyper::Body>) -> Result<hyper::Response<hyper::Body>, Error> {
             let standard_claims: StandardClaims<CoreGenderClaim> = StandardClaims::new(SubjectIdentifier::new("sub-123".to_string()));
             let additional_claims = EmptyAdditionalClaims {};
             let claims = UserInfoClaims::new(standard_claims, additional_claims);
             let claims_doc = serde_json::to_string(&claims)
                 .map_err(|err| Error::custom(format!("Error while building UserInfo JSON response: {}", err)))?;
-            request.respond(
-                Response::empty(StatusCode(200))
-                .with_header(Header::from_str("Content-Type: application/json").unwrap())
-                .with_data(claims_doc.clone().as_bytes(), None)
-            ).map_err(|err| err.into())
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/json")
+                .body(str_to_body(&claims_doc))
+                .map_err(|err| Error::custom(err))
         }
 
-        fn handle_request(
-            request: Request,
+        async fn handle_request(
+            request: hyper::Request<hyper::Body>,
             discovery_doc: &str,
             jwks_doc: &str,
             login_doc: &str,
-            signing_key: &CoreRsaPrivateSigningKey,
+            signing_key: Arc<Mutex<CoreRsaPrivateSigningKey>>,
             authz_codes: &mut TempAuthzCodes,
             login_sessions: &mut LoginSessions,
             known_users: &KnownUsers)
-         -> Result<(), Error> {
-            let url = urlparse(request.url());
-            match request.method() {
-                Method::Get => {
-                    match url.path.as_str() {
+        -> Result<hyper::Response<hyper::Body>, Error> {
+            match *request.method() {
+                Method::GET => {
+                    match request.uri().path() {
                         "/.well-known/openid-configuration" => {
-                            return handle_discovery_request(request, discovery_doc);
+                            handle_discovery_request(request, discovery_doc)
                         },
                         "/jwk" => {
-                            return handle_jwks_request(request, jwks_doc);
+                            handle_jwks_request(request, jwks_doc)
                         },
                         "/authorize" => {
-                            return handle_authorize_request(request, url, login_doc);
+                            handle_authorize_request(request, login_doc)
                         },
                         "/login_form_submit" => {
-                            return handle_login_request(request, url, authz_codes, known_users);
+                            handle_login_request(request, authz_codes, known_users)
                         },
                         "/userinfo" => {
-                            return handle_user_info_request(request);
+                            handle_user_info_request(request)
                         }
-                        _ => {}
+                        _ => {
+                            Response::builder()
+                                .status(StatusCode::NOT_FOUND)
+                                .body(Body::empty())
+                                .map_err(|err| Error::custom(err))
+                        }
                     }
                 },
-                Method::Post => {
-                    match url.path.as_str() {
+                Method::POST => {
+                    match request.uri().path() {
                         "/token" => {
-                            return handle_token_request(request, signing_key, authz_codes, login_sessions, known_users);
+                            handle_token_request(request, signing_key, authz_codes, login_sessions, known_users)
                         },
-                        _ => {}
+                        _ => {
+                            Response::builder()
+                                .status(StatusCode::NOT_FOUND)
+                                .body(Body::empty())
+                                .map_err(|err| Error::custom(err))
+                        }
                     }
                 },
-                _ => {}
-            };
-
-            return Err(Error::custom(format!("Unknown request: {:?}", request)));
+                _ => {
+                    Response::builder()
+                        .status(StatusCode::METHOD_NOT_ALLOWED)
+                        .body(Body::empty())
+                        .map_err(|err| Error::custom(err))
+                }
+            }
         }
 
         fn log_error(err: Error) {
@@ -467,22 +478,48 @@ fn run_mock_openid_connect_server() {
         let address = "127.0.0.1:3001";
         println!("Mock OpenID Connect server: starting on {}", address);
 
-        let server = Server::http(address).unwrap();
-        MOCK_OPENID_CONNECT_SERVER_RUNNING_FLAG.store(true, Ordering::Relaxed);
-        while MOCK_OPENID_CONNECT_SERVER_RUNNING_FLAG.load(Ordering::Relaxed) {
-            match server.recv_timeout(Duration::new(1, 0)) {
-                Ok(None) => { /* no request received within the timeout */ },
-                Ok(Some(request)) => {
-                    if let Err(err) = handle_request(request, &discovery_doc, &jwks_doc, &login_doc, &signing_key, &mut authz_codes, &mut login_sessions, &known_users) {
-                        log_error(err);
-                    }
-                },
-                Err(err) => { 
-                    log_error(err.into());
-                }
-            };
+        // let server = Server::http(address).unwrap();
+        // MOCK_OPENID_CONNECT_SERVER_RUNNING_FLAG.store(true, Ordering::Relaxed);
+        // while MOCK_OPENID_CONNECT_SERVER_RUNNING_FLAG.load(Ordering::Relaxed) {
+        //     match server.recv_timeout(Duration::new(1, 0)) {
+        //         Ok(None) => { /* no request received within the timeout */ },
+        //         Ok(Some(request)) => {
+        //             if let Err(err) = handle_request(request, &discovery_doc, &jwks_doc, &login_doc, &signing_key, &mut authz_codes, &mut login_sessions, &known_users) {
+        //                 log_error(err);
+        //             }
+        //         },
+        //         Err(err) => { 
+        //             log_error(err.into());
+        //         }
+        //     };
+        // }
+
+        let addr: SocketAddr = address.parse().unwrap();
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+        let signing_key = Arc::new(Mutex::new(signing_key));
+
+        let service = make_service_fn(move |_| {
+            let signing_key_capture = signing_key.clone();
+            async {
+                Ok::<_, Infallible>(service_fn(move |req: hyper::Request<hyper::Body>| {
+                    handle_request(req, &discovery_doc, &jwks_doc, &login_doc, signing_key.clone(), &mut authz_codes, &mut login_sessions, &known_users)
+                }))
+            }
+        });
+
+        let server = Server::bind(&addr).serve(service);
+
+        let graceful = server.with_graceful_shutdown(async {
+            rx.await.ok();
+            println!("Mock OpenID Connect: stopping");
+        });
+
+        if let Err(err) = graceful.await {
+            log_error(Error::custom(format!("Server error: {}", err)));
         }
 
-        println!("Mock OpenID Connect: stopped");
-    });
+        tx
+    // });
 }
