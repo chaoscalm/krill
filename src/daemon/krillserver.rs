@@ -338,8 +338,8 @@ impl KrillServer {
         &self.system_actor
     }
 
-    pub fn actor_from_request(&self, request: &hyper::Request<hyper::Body>) -> Actor {
-        self.authorizer.actor_from_request(request)
+    pub async fn actor_from_request(&self, request: &hyper::Request<hyper::Body>) -> Actor {
+        self.authorizer.actor_from_request(request).await
     }
 
     pub fn actor_from_def(&self, actor_def: ActorDef) -> Actor {
@@ -350,12 +350,12 @@ impl KrillServer {
         self.authorizer.get_login_url()
     }
 
-    pub fn login(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<LoggedInUser> {
-        self.authorizer.login(request)
+    pub async fn login(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<LoggedInUser> {
+        self.authorizer.login(request).await
     }
 
-    pub fn logout(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<HttpResponse> {
-        self.authorizer.logout(request)
+    pub async fn logout(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<HttpResponse> {
+        self.authorizer.logout(request).await
     }
 
     pub fn limit_api(&self) -> u64 {

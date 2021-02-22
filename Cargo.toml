@@ -17,6 +17,7 @@ exclude = [
 build = "build.rs"
 
 [dependencies]
+async-trait     = "^0.1"
 base64          = "^0.13"
 basic-cookies   = { version = "^0.1", optional = true }
 bcder           = "0.5.0"
@@ -33,12 +34,17 @@ intervaltree    = "0.2.6"
 jmespatch       = { version = "^0.3", features = ["sync"], optional = true }
 libflate        = "^1.0"
 log             = "^0.4"
-openidconnect   = { version = "^1.0", optional = true }
-#openidconnect = { git = "https://github.com/ximon18/openidconnect-rs.git", branch = "krill-hack", optional = true }
+# use openidconnect local fork PR branch because the latest released version depends on an oauth2-rs version that is too
+# old and lacks an implementation of fn RefreshTokenRequest::request_async(), and because latest openidconnect-rs main
+# branch is broken as it depends on oauth2-rs 4.0.0-alpha.3 (lacking a leading =) which therefore builds with
+# 4.0.0-alpha.5 which includes breaking changes (inspection -> introspection), and because the PR branch for
+# openidconnect-rs which fixes this depends on a version of oauth2-rs which is not yet published to crates.io.... We use
+# default_features = false in order to prevent openidconnect dependening on another copy of the reqwest crate.
+openidconnect   = { version = "2.0.0-alpha.3", optional = true, default_features = false, git = "https://github.com/ximon18/openidconnect-rs.git", branch = "expose-oauth2-introspection-and-revocation-features" }
 openssl         = { version = "^0.10", features = ["v110"] }
 oso             = { version = "^0.8", optional = true }
 regex           = { version = "^1.4", optional = true }
-reqwest         = { version = "0.10.8", features = [ "json"] }
+reqwest         = { version = "0.10.8", features = ["json"] }
 rpki            = "^0.10.0"
 serde           = { version = "^1.0", features = ["derive"] }
 serde_json      = "^1.0"

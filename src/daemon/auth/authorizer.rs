@@ -1,4 +1,5 @@
 //! Authorization for the API
+use async_trait::async_trait;
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -33,6 +34,7 @@ use crate::{
 ///  * discovery      - as an interactive client where should I send my users to
 ///                     login and logout?
 ///  * introspection  - who is the currently "logged in" user?
+#[async_trait]
 pub trait AuthProvider: Send + Sync {
     fn get_bearer_token(&self, request: &hyper::Request<hyper::Body>) -> Option<Token> {
         if let Some(header) = request.headers().get("Authorization") {
@@ -51,10 +53,10 @@ pub trait AuthProvider: Send + Sync {
         None
     }
 
-    fn authenticate(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<Option<ActorDef>>;
-    fn get_login_url(&self) -> KrillResult<HttpResponse>;
-    fn login(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<LoggedInUser>;
-    fn logout(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<HttpResponse>;
+    async fn authenticate(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<Option<ActorDef>>;
+    async fn get_login_url(&self) -> KrillResult<HttpResponse>;
+    async fn login(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<LoggedInUser>;
+    async fn logout(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<HttpResponse>;
 }
 
 /// This type is responsible for checking authorizations when the API is
@@ -113,19 +115,19 @@ impl Authorizer {
         })
     }
 
-    pub fn actor_from_request(&self, request: &hyper::Request<hyper::Body>) -> Actor {
+    pub async fn actor_from_request(&self, request: &hyper::Request<hyper::Body>) -> Actor {
         trace!("Determining actor for request {:?}", &request);
 
         // Try the legacy provider first, if any
         let mut authenticate_res = match &self.legacy_provider {
-            Some(provider) => provider.authenticate(request),
+            Some(provider) => provider.authenticate(request).await,
             None => Ok(None),
         };
 
         // Try the real provider if we did not already successfully authenticate
         authenticate_res = match authenticate_res {
             Ok(Some(res)) => Ok(Some(res)),
-            _ => self.primary_provider.authenticate(request),
+            _ => self.primary_provider.authenticate(request).await,
         };
 
         // Create an actor based on the authentication result
@@ -154,14 +156,14 @@ impl Authorizer {
 
     /// Return the URL at which an end-user should be directed to login with the
     /// configured provider.
-    pub fn get_login_url(&self) -> KrillResult<HttpResponse> {
-        self.primary_provider.get_login_url()
+    pub async fn get_login_url(&self) -> KrillResult<HttpResponse> {
+        self.primary_provider.get_login_url().await
     }
 
     /// Submit credentials directly to the configured provider to establish a
     /// login session, if supported by the configured provider.
-    pub fn login(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<LoggedInUser> {
-        let user = self.primary_provider.login(request)?;
+    pub async fn login(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<LoggedInUser> {
+        let user = self.primary_provider.login(request).await?;
 
         // The user has passed authentication, but may still not be
         // authorized to login as that requires a check against the policy
@@ -200,8 +202,8 @@ impl Authorizer {
 
     /// Return the URL at which an end-user should be directed to logout with
     /// the configured provider.
-    pub fn logout(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<HttpResponse> {
-        self.primary_provider.logout(request)
+    pub async fn logout(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<HttpResponse> {
+        self.primary_provider.logout(request).await
     }
 }
 

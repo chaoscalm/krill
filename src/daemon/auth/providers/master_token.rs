@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use std::sync::Arc;
 
 use crate::commons::error::Error;
@@ -27,8 +28,9 @@ impl MasterTokenAuthProvider {
     }
 }
 
+#[async_trait]
 impl AuthProvider for MasterTokenAuthProvider {
-    fn authenticate(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<Option<ActorDef>> {
+    async fn authenticate(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<Option<ActorDef>> {
         if log_enabled!(log::Level::Trace) {
             trace!("Attempting to authenticate the request..");
         }
@@ -46,13 +48,13 @@ impl AuthProvider for MasterTokenAuthProvider {
         res
     }
 
-    fn get_login_url(&self) -> KrillResult<HttpResponse> {
+    async fn get_login_url(&self) -> KrillResult<HttpResponse> {
         // Direct Lagosta to show the user the Lagosta API token login form
         Ok(HttpResponse::text_no_cache(LAGOSTA_LOGIN_ROUTE_PATH.into()))
     }
 
-    fn login(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<LoggedInUser> {
-        match self.authenticate(request)? {
+    async fn login(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<LoggedInUser> {
+        match self.authenticate(request).await? {
             Some(actor_def) => Ok(LoggedInUser {
                 token: self.required_token.clone(),
                 id: actor_def.name.as_str().to_string(),
@@ -62,8 +64,8 @@ impl AuthProvider for MasterTokenAuthProvider {
         }
     }
 
-    fn logout(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<HttpResponse> {
-        if let Ok(Some(actor)) = self.authenticate(request) {
+    async fn logout(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<HttpResponse> {
+        if let Ok(Some(actor)) = self.authenticate(request).await {
             info!("User logged out: {}", actor.name.as_str());
         }
 

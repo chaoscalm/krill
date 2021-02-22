@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
 
 use urlparse::{urlparse, GetQuery};
@@ -83,8 +84,9 @@ impl ConfigFileAuthProvider {
     }
 }
 
+#[async_trait]
 impl AuthProvider for ConfigFileAuthProvider {
-    fn authenticate(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<Option<ActorDef>> {
+    async fn authenticate(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<Option<ActorDef>> {
         if log_enabled!(log::Level::Trace) {
             trace!("Attempting to authenticate the request..");
         }
@@ -109,12 +111,12 @@ impl AuthProvider for ConfigFileAuthProvider {
         res
     }
 
-    fn get_login_url(&self) -> KrillResult<HttpResponse> {
+    async fn get_login_url(&self) -> KrillResult<HttpResponse> {
         // Direct Lagosta to show the user the Lagosta API token login form
         Ok(HttpResponse::text_no_cache(LAGOSTA_LOGIN_ROUTE_PATH.into()))
     }
 
-    fn login(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<LoggedInUser> {
+    async fn login(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<LoggedInUser> {
         if let Some(Auth::IdAndPasswordHash { id, password_hash }) = self.get_auth(request) {
             if let Some(user) = self.users.get(&id) {
                 if user.password_hash == password_hash {
@@ -136,12 +138,12 @@ impl AuthProvider for ConfigFileAuthProvider {
         }
     }
 
-    fn logout(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<HttpResponse> {
+    async fn logout(&self, request: &hyper::Request<hyper::Body>) -> KrillResult<HttpResponse> {
         match self.get_bearer_token(request) {
             Some(token) => {
                 self.session_cache.remove(&token);
 
-                if let Ok(Some(actor)) = self.authenticate(request) {
+                if let Ok(Some(actor)) = self.authenticate(request).await {
                     info!("User logged out: {}", actor.name.as_str());
                 }
             }
